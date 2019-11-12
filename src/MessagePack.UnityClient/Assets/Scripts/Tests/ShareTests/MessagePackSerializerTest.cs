@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using MessagePack.Formatters;
 using MessagePack.Resolvers;
 using Nerdbank.Streams;
 using SharedData;
@@ -96,6 +97,52 @@ namespace MessagePack.Tests
             decompress2.IsStructuralEqual(originalData);
             decompress3.IsStructuralEqual(originalData);
             decompress4.IsStructuralEqual(originalData);
+        }
+
+        [Fact]
+        public void BufferRecyclingDeferral()
+        {
+            var ms = new NonMemoryStream(new MemoryStream());
+            MessagePackSerializer.Serialize(ms, "hi");
+            ms.Position = 0;
+
+            var resolver = CompositeResolver.Create(
+                new IMessagePackFormatter[] { new LazyDeserializerFormatter<string>() },
+                new IFormatterResolver[] { StandardResolver.Instance });
+            var options = MessagePackSerializerOptions.Standard.WithResolver(resolver);
+            Lazy<string> lazy = MessagePackSerializer.Deserialize<Lazy<string>>(ms, options);
+            Assert.NotNull(lazy);
+            Assert.False(lazy.IsValueCreated);
+            Assert.Equal("hi", lazy.Value);
+        }
+
+        private class LazyDeserializerFormatter<T> : IMessagePackFormatter<Lazy<T>>
+        {
+            public Lazy<T> Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+            {
+                SequencePosition startPosition = reader.Position;
+                reader.Skip();
+                var slice = reader.Sequence.Slice(startPosition, reader.Position);
+                IDisposable release = reader.ObtainBufferRecyclingDeferral();
+                var formatter = options.Resolver.GetFormatterWithVerify<T>();
+                return new Lazy<T>(() =>
+                {
+                    try
+                    {
+                        var deferredReader = new MessagePackReader(slice);
+                        return formatter.Deserialize(ref deferredReader, options);
+                    }
+                    finally
+                    {
+                        release.Dispose();
+                    }
+                });
+            }
+
+            public void Serialize(ref MessagePackWriter writer, Lazy<T> value, MessagePackSerializerOptions options)
+            {
+                throw new NotImplementedException();
+            }
         }
     }
 

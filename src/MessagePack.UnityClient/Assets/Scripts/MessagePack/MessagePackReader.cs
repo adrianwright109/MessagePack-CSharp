@@ -8,6 +8,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using MessagePack.Internal;
+using Nerdbank.Streams;
 
 namespace MessagePack
 {
@@ -24,6 +25,8 @@ namespace MessagePack
 #endif
     ref partial struct MessagePackReader
     {
+        private readonly BufferManager bufferManager;
+
         /// <summary>
         /// The reader over the sequence.
         /// </summary>
@@ -36,6 +39,7 @@ namespace MessagePack
         public MessagePackReader(ReadOnlyMemory<byte> memory)
         {
             this.reader = new SequenceReader<byte>(memory);
+            this.bufferManager = null;
         }
 
         /// <summary>
@@ -45,6 +49,22 @@ namespace MessagePack
         public MessagePackReader(in ReadOnlySequence<byte> readOnlySequence)
         {
             this.reader = new SequenceReader<byte>(readOnlySequence);
+            this.bufferManager = null;
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="MessagePackReader"/> struct.
+        /// </summary>
+        /// <param name="recyclableBuffer">The sequence to read from and recycle when deserialization is over.</param>
+        internal MessagePackReader(Sequence<byte> recyclableBuffer)
+        {
+            if (recyclableBuffer is null)
+            {
+                throw new ArgumentNullException(nameof(recyclableBuffer));
+            }
+
+            this.reader = new SequenceReader<byte>(recyclableBuffer.AsReadOnlySequence);
+            this.bufferManager = new BufferManager(recyclableBuffer);
         }
 
         /// <summary>
@@ -111,11 +131,24 @@ namespace MessagePack
         };
 
         /// <summary>
+        /// Initializes a new instance of the <see cref="MessagePackReader"/> struct,
+        /// with the same settings as this one, but with its own buffer to read from.
+        /// </summary>
+        /// <inheritdoc cref="MessagePackReader(Sequence{byte})" />
+        /// <returns>The new reader.</returns>
+        internal MessagePackReader Clone(Sequence<byte> recyclableBuffer) => new MessagePackReader(recyclableBuffer)
+        {
+            CancellationToken = this.CancellationToken,
+        };
+
+        /// <summary>
         /// Creates a new <see cref="MessagePackReader"/> at this reader's current position.
         /// The two readers may then be used independently without impacting each other.
         /// </summary>
         /// <returns>A new <see cref="MessagePackReader"/>.</returns>
         public MessagePackReader CreatePeekReader() => this.Clone(this.reader.Sequence.Slice(this.reader.Position));
+
+        public IDisposable ObtainBufferRecyclingDeferral() => this.bufferManager?.ObtainDeferral() ?? NoOpDisposable.Instance;
 
         /// <summary>
         /// Advances the reader to the next MessagePack primitive to be read.
@@ -752,6 +785,8 @@ namespace MessagePack
             return new ExtensionResult(header.TypeCode, data);
         }
 
+        internal void ReleaseOwnerInterestInBuffer() => this.bufferManager?.Dispose();
+
         /// <summary>
         /// Throws an exception indicating that there aren't enough bytes remaining in the buffer to store
         /// the promised data.
@@ -908,6 +943,67 @@ namespace MessagePack
             {
                 this.Skip(); // key
                 this.Skip(); // value
+            }
+        }
+
+        private class BufferManager : IDisposable
+        {
+            private Sequence<byte> recyclableBuffer;
+
+            /// <summary>
+            /// The number of parties interested in the buffer remaining allocated.
+            /// The default value is 1 because the creator gets an implicit ref count.
+            /// </summary>
+            private int refCount = 1;
+
+            internal BufferManager(Sequence<byte> recyclableBuffer)
+            {
+                this.recyclableBuffer = recyclableBuffer ?? throw new ArgumentNullException(nameof(recyclableBuffer));
+            }
+
+            public void Dispose()
+            {
+                lock (this)
+                {
+                    if (this.refCount < 1)
+                    {
+                        throw new InvalidOperationException("No ref count to release.");
+                    }
+
+                    if (--this.refCount == 0)
+                    {
+                        this.recyclableBuffer?.Reset();
+                        this.recyclableBuffer = null;
+                    }
+                }
+            }
+
+            internal IDisposable ObtainDeferral()
+            {
+                lock (this)
+                {
+                    if (this.refCount == 0)
+                    {
+                        throw new ObjectDisposedException(typeof(BufferManager).FullName, "Already disposed.");
+                    }
+
+                    this.refCount++;
+                }
+
+                return this;
+            }
+        }
+
+        private class NoOpDisposable : IDisposable
+        {
+            internal static readonly IDisposable Instance = new NoOpDisposable();
+
+            private NoOpDisposable()
+            {
+            }
+
+            public void Dispose()
+            {
             }
         }
     }

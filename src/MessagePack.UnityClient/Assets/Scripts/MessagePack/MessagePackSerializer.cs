@@ -85,7 +85,7 @@ namespace MessagePack
             {
                 if (options.UseLZ4Compression)
                 {
-                    using (var scratch = new Nerdbank.Streams.Sequence<byte>())
+                    using (var scratch = new Sequence<byte>())
                     {
                         MessagePackWriter scratchWriter = writer.Clone(scratch);
                         options.Resolver.GetFormatterWithVerify<T>().Serialize(ref scratchWriter, value, options);
@@ -227,17 +227,27 @@ namespace MessagePack
             {
                 if (options.UseLZ4Compression)
                 {
-                    using (var msgPackUncompressed = new Nerdbank.Streams.Sequence<byte>())
+                    var msgPackUncompressed = new Sequence<byte>();
+                    try
                     {
                         if (TryDecompress(ref reader, msgPackUncompressed))
                         {
-                            MessagePackReader uncompressedReader = reader.Clone(msgPackUncompressed.AsReadOnlySequence);
-                            return options.Resolver.GetFormatterWithVerify<T>().Deserialize(ref uncompressedReader, options);
+                            MessagePackReader uncompressedReader = reader.Clone(msgPackUncompressed);
+                            T result = options.Resolver.GetFormatterWithVerify<T>().Deserialize(ref uncompressedReader, options);
+                            uncompressedReader.ReleaseOwnerInterestInBuffer();
+                            return result;
                         }
                         else
                         {
                             return options.Resolver.GetFormatterWithVerify<T>().Deserialize(ref reader, options);
                         }
+                    }
+                    catch
+                    {
+                        // We only Reset/Dispose of this in the exception path.
+                        // In the happy path, it gets reset when the ref count goes to 0.
+                        msgPackUncompressed.Reset();
+                        throw;
                     }
                 }
                 else
@@ -315,29 +325,37 @@ namespace MessagePack
             cancellationToken.ThrowIfCancellationRequested();
             if (stream is MemoryStream ms && ms.TryGetBuffer(out ArraySegment<byte> streamBuffer))
             {
+                // TODO: In this code path, we're "borrowing" someone else's buffers and can't control the timeframe.
+                // Should we copy the buffer now (if any resolver may want it?) or later? Or should we
+                // indicate to the formatter asking for the that we can't guarantee the buffer so they should copy the slice they need or fail?
                 return Deserialize<T>(streamBuffer, options, cancellationToken);
             }
 
-            using (var sequence = new Sequence<byte>())
+            var sequence = new Sequence<byte>();
+            try
             {
-                try
+                int bytesRead;
+                do
                 {
-                    int bytesRead;
-                    do
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        Span<byte> span = sequence.GetSpan(stream.CanSeek ? (int)(stream.Length - stream.Position) : 0);
-                        bytesRead = stream.Read(span);
-                        sequence.Advance(bytesRead);
-                    }
-                    while (bytesRead > 0);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    Span<byte> span = sequence.GetSpan(stream.CanSeek ? (int)(stream.Length - stream.Position) : 0);
+                    bytesRead = stream.Read(span);
+                    sequence.Advance(bytesRead);
                 }
-                catch (Exception ex)
-                {
-                    throw new MessagePackSerializationException("Error occurred while reading from the stream.", ex);
-                }
+                while (bytesRead > 0);
 
-                return Deserialize<T>(sequence.AsReadOnlySequence, options, cancellationToken);
+                var reader = new MessagePackReader(sequence)
+                {
+                    CancellationToken = cancellationToken,
+                };
+                T result = Deserialize<T>(ref reader, options);
+                reader.ReleaseOwnerInterestInBuffer();
+                return result;
+            }
+            catch (Exception ex)
+            {
+                sequence.Reset();
+                throw new MessagePackSerializationException("Error occurred while reading from the stream.", ex);
             }
         }
 
@@ -357,26 +375,36 @@ namespace MessagePack
                 return Deserialize<T>(streamBuffer, options, cancellationToken);
             }
 
-            using (var sequence = new Sequence<byte>())
+            var sequence = new Sequence<byte>();
+            try
             {
-                try
+                int bytesRead;
+                do
                 {
-                    int bytesRead;
-                    do
-                    {
-                        Memory<byte> memory = sequence.GetMemory(stream.CanSeek ? (int)(stream.Length - stream.Position) : 0);
-                        bytesRead = await stream.ReadAsync(memory, cancellationToken).ConfigureAwait(false);
-                        sequence.Advance(bytesRead);
-                    }
-                    while (bytesRead > 0);
+                    Memory<byte> memory = sequence.GetMemory(stream.CanSeek ? (int)(stream.Length - stream.Position) : 0);
+                    bytesRead = await stream.ReadAsync(memory, cancellationToken).ConfigureAwait(false);
+                    sequence.Advance(bytesRead);
                 }
-                catch (Exception ex)
-                {
-                    throw new MessagePackSerializationException("Error occurred while reading from the stream.", ex);
-                }
+                while (bytesRead > 0);
 
-                return Deserialize<T>(sequence.AsReadOnlySequence, options, cancellationToken);
+                return DeserializeHelper<T>(sequence, options, cancellationToken);
             }
+            catch (Exception ex)
+            {
+                sequence.Reset();
+                throw new MessagePackSerializationException("Error occurred while reading from the stream.", ex);
+            }
+        }
+
+        private static T DeserializeHelper<T>(Sequence<byte> recyclableSequence, MessagePackSerializerOptions options, CancellationToken cancellationToken)
+        {
+            var reader = new MessagePackReader(recyclableSequence ?? throw new ArgumentNullException(nameof(recyclableSequence)))
+            {
+                CancellationToken = cancellationToken,
+            };
+            T result = Deserialize<T>(ref reader, options);
+            reader.ReleaseOwnerInterestInBuffer();
+            return result;
         }
 
         private delegate int LZ4Transform(ReadOnlySpan<byte> input, Span<byte> output);
