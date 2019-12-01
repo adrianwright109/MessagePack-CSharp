@@ -112,16 +112,11 @@ namespace MessagePack
             if (this.ReadData.Length > 0)
             {
                 var reader = new MessagePackReader(this.ReadData);
-                try
+                if (reader.TrySkip())
                 {
-                    reader.Skip();
                     this.endOfLastMessage = reader.Position;
                     completeMessage = reader.Sequence.Slice(0, reader.Position);
                     return true;
-                }
-                catch (EndOfStreamException)
-                {
-                    // Handle the same way as an entirely empty sequence.
                 }
             }
 
