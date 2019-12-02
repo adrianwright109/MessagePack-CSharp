@@ -297,46 +297,79 @@ namespace MessagePack
         }
 
         /// <summary>
-        /// Deserializes the entire content of a <see cref="Stream"/>.
+        /// Deserializes a MessagePack structure from a <see cref="Stream"/> that is entirely made up of messagepack data.
         /// </summary>
         /// <typeparam name="T">The type of value to deserialize.</typeparam>
         /// <param name="stream">
-        /// The stream to deserialize from.
-        /// The entire stream will be read, and the first msgpack token deserialized will be returned.
-        /// If <see cref="Stream.CanSeek"/> is true on the stream, its position will be set to just after the last deserialized byte.
+        /// The stream to deserialize from. More bytes may be read than those that define a single messagepack structure.
+        /// </param>
+        /// <param name="state">
+        /// State to carry from one call of this method to the next, allowing sequential reading of messagepack structures from the stream.
+        /// The first time this method is called, this value should be provided by a variable initialized with the default value of the structure.
+        /// Each subsequent call to this method with the same <paramref name="stream"/> argument should use the same variable for this state argument as well.
         /// </param>
         /// <param name="options">The options. Use <c>null</c> to use default options.</param>
         /// <param name="cancellationToken">A cancellation token.</param>
         /// <returns>The deserialized value.</returns>
         /// <exception cref="MessagePackSerializationException">Thrown when any error occurs during deserialization.</exception>
-        public static T Deserialize<T>(Stream stream, MessagePackSerializerOptions options = null, CancellationToken cancellationToken = default)
+        public static T Deserialize<T>(Stream stream, ref MessagePackStreamReadingState state, MessagePackSerializerOptions options = null, CancellationToken cancellationToken = default)
         {
+            // TODO: wrap all (non-local argument) exceptions
             if (TryDeserializeFromMemoryStream(stream, options, cancellationToken, out T result))
             {
                 return result;
             }
 
-            using (var sequenceRental = SequencePool.Shared.Rent())
+            if (state.IsDefault)
             {
-                var sequence = sequenceRental.Value;
-                try
+                state = new MessagePackStreamReadingState(stream);
+            }
+            else if (state.Stream != stream)
+            {
+                throw new ArgumentException("State mismatched with stream.", nameof(state));
+            }
+
+            if (state.EndOfLastMessage.HasValue)
+            {
+                // A previously returned message can now be safely recycled since the caller wants more.
+                state.ReadData.AdvanceTo(state.EndOfLastMessage.Value);
+                state.EndOfLastMessage = null;
+            }
+
+            while (true)
+            {
+                // Check if we have a complete message and return it if we have it.
+                // We do this before reading anything since a previous read may have brought in several messages.
+                cancellationToken.ThrowIfCancellationRequested();
+                if (state.ReadData.Length > 0)
                 {
-                    int bytesRead;
-                    do
+                    var reader = new MessagePackReader(state.ReadData);
+                    if (reader.TrySkip())
                     {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        Span<byte> span = sequence.GetSpan(stream.CanSeek ? (int)(stream.Length - stream.Position) : 0);
-                        bytesRead = stream.Read(span);
-                        sequence.Advance(bytesRead);
+                        state.EndOfLastMessage = reader.Position;
+                        ReadOnlySequence<byte> completeMessage = reader.Sequence.Slice(0, reader.Position);
+                        return Deserialize<T>(completeMessage, options, cancellationToken);
                     }
-                    while (bytesRead > 0);
-                }
-                catch (Exception ex)
-                {
-                    throw new MessagePackSerializationException("Error occurred while reading from the stream.", ex);
                 }
 
-                return DeserializeFromSequenceAndRewindStreamIfPossible<T>(stream, options, sequence, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                Span<byte> buffer = state.ReadData.GetSpan(sizeHint: 0);
+                int bytesRead = 0;
+                try
+                {
+                    bytesRead = state.Stream.Read(buffer);
+                    if (bytesRead == 0)
+                    {
+                        // We've reached the end of the stream.
+                        // We already checked for a complete message with what we already had, so evidently it's not a complete message.
+                        throw new EndOfStreamException();
+                    }
+                }
+                finally
+                {
+                    // Keep our state clean in case the caller wants to call us again.
+                    state.ReadData.Advance(bytesRead);
+                }
             }
         }
 
@@ -398,6 +431,10 @@ namespace MessagePack
                 // Emulate that we had actually "read" from the stream.
                 ms.Seek(bytesRead, SeekOrigin.Current);
                 return true;
+            }
+            else if (stream is null)
+            {
+                throw new ArgumentNullException(nameof(stream));
             }
 
             result = default;
