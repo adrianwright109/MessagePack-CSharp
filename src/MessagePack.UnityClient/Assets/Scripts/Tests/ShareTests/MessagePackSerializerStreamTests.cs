@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Nerdbank.Streams;
@@ -14,14 +15,14 @@ using Xunit;
 
 namespace MessagePack.Tests
 {
-    public class MessagePackStreamReaderTests
+    public class MessagePackSerializerStreamTests
     {
         private static readonly TimeSpan TestTimeoutSpan = Debugger.IsAttached ? Timeout.InfiniteTimeSpan : TimeSpan.FromSeconds(5);
         private readonly ReadOnlySequence<byte> twoMessages;
         private readonly IReadOnlyList<SequencePosition> messagePositions;
         private readonly CancellationToken timeoutToken = new CancellationTokenSource(TestTimeoutSpan).Token;
 
-        public MessagePackStreamReaderTests()
+        public MessagePackSerializerStreamTests()
         {
             var sequence = new Sequence<byte>();
             var writer = new MessagePackWriter(sequence);
@@ -44,18 +45,31 @@ namespace MessagePack.Tests
         }
 
         [Fact]
-        public void Ctor_NullStream()
+        public void Deserialize_NullStream()
         {
-            Assert.Throws<ArgumentNullException>(() => new MessagePackStreamReader(null));
+            Assert.Throws<ArgumentNullException>("stream", () => MessagePackSerializer.Deserialize<bool>(stream: null));
+            Assert.Throws<ArgumentNullException>("stream", () =>
+            {
+                var state = default(MessagePackStreamReadingState);
+                MessagePackSerializer.Deserialize<bool>(stream: null, ref state);
+            });
         }
 
         [Fact]
-        public void RemainingBytes_BeforeReading()
+        public async Task DeserializeAsync_NullStream()
         {
-            using (var reader = new MessagePackStreamReader(new MemoryStream()))
+            await Assert.ThrowsAsync<ArgumentNullException>("stream", async () => await MessagePackSerializer.DeserializeAsync<bool>(stream: null));
+            await Assert.ThrowsAsync<ArgumentNullException>("stream", async () =>
             {
-                Assert.True(reader.RemainingBytes.IsEmpty);
-            }
+                var state = new StrongBox<MessagePackStreamReadingState>();
+                await MessagePackSerializer.DeserializeAsync<bool>(stream: null, state);
+            });
+        }
+
+        [Fact]
+        public async Task DeserializeAsync_NullState()
+        {
+            await Assert.ThrowsAsync<ArgumentNullException>("state", async () => await MessagePackSerializer.DeserializeAsync<bool>(stream: new MemoryStream(), state: null));
         }
 
         [Fact]
