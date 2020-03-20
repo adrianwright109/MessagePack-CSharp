@@ -1,6 +1,10 @@
 // Copyright (c) All contributors. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
+#if CSHARP8
+#nullable disable
+#endif
+
 using System;
 using System.Buffers;
 using System.IO;
@@ -17,7 +21,12 @@ namespace MessagePack
     /// This class is *not* thread-safe. Do not call more than one member at once and be sure any call completes (including asynchronous tasks)
     /// before calling the next one.
     /// </remarks>
-    public partial class MessagePackStreamReader : IDisposable
+#if MESSAGEPACK_INTERNAL
+    internal
+#else
+    public
+#endif
+    partial class MessagePackStreamReader : IDisposable
     {
         private readonly Stream stream;
         private readonly bool leaveOpen;
