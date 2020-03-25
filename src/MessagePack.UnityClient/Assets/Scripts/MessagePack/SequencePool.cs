@@ -118,7 +118,7 @@ namespace MessagePack
             /// </remarks>
             public void Dispose()
             {
-                this.owner.Return(this.Value);
+                this.owner?.Return(this.Value);
             }
         }
     }
