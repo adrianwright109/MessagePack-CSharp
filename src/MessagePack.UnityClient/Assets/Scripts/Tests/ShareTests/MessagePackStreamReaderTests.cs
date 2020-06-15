@@ -31,9 +31,11 @@ namespace MessagePack.Tests
             positions.Add(sequence.AsReadOnlySequence.End);
 
             // Second message is more interesting.
-            writer.WriteArrayHeader(2);
+            writer.WriteArrayHeader(4);
             writer.Write("Hi");
-            writer.Write("There");
+            writer.Write("There + " + new string('3', 300)); // a long enough string that a multi-byte header is required.
+            writer.Write(new byte[300]); // a long enough byte array that a multi-byte header is required.
+            writer.WriteExtensionFormat(new ExtensionResult(1, new byte[300]));
             writer.Flush();
             positions.Add(sequence.AsReadOnlySequence.End);
 
@@ -173,6 +175,15 @@ namespace MessagePack.Tests
             var ms = new MemoryStream();
             new MessagePackStreamReader(ms, leaveOpen: true).Dispose();
             Assert.True(ms.CanSeek);
+        }
+
+        [Fact]
+        public void DoubleDisposal()
+        {
+            var ms = new MemoryStream();
+            var reader = new MessagePackStreamReader(ms);
+            reader.Dispose();
+            reader.Dispose();
         }
     }
 }
