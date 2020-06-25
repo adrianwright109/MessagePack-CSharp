@@ -9,10 +9,12 @@
 #nullable disable
 #endif
 
+using System;
+using System.Buffers;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 
-namespace System.Buffers
+namespace MessagePack
 {
     internal ref partial struct SequenceReader<T>
         where T : unmanaged, IEquatable<T>

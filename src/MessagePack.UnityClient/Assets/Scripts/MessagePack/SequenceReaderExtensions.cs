@@ -9,12 +9,13 @@
 #nullable disable
 #endif
 
+using System;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
-namespace System.Buffers
+namespace MessagePack
 {
     internal static partial class SequenceReaderExtensions
     {
